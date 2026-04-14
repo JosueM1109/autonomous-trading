@@ -53,7 +53,7 @@ If any required MCP server is not connected, refuse to run and tell Josue which 
 ## Token Efficiency Rules
 1. **Phase 1 (account + Fear & Greed) fires in parallel with Phase 1.5 (morning screen)** — both are independent. Fire Alpaca account + clock + positions + Fear & Greed curl + `smart_volume_scanner` per exchange all in the same message.
 2. **Phase 2 (dossiers) must wait for Phase 1.5** because the candidate list comes from Phase 1.5 output. Once the candidate list exists, fire in one message: two `coin_analysis` calls per ticker (1D and 1H), the single batched Alpaca `get_stock_snapshot`, and the Finnhub earnings curl.
-3. **Phase 2.5 (news search) fires after Phase 2 returns** — the top-5-by-volume-ratio list depends on dossier fields. Fire all top-5 `WebSearch` calls in one parallel message.
+3. **Phase 2.5 (news search) fires after Phase 2 returns** — the top-5-by-volume-ratio list depends on dossier fields. Fire all top-5 Finnhub `/company-news` curls in one parallel bash block.
 4. Read `tools/stock-trading/config.json` once at the start — never re-read during reasoning.
 5. **Hard vs. soft dependencies for exclusion**: 1D TradingView call and Alpaca snapshot are hard (missing → ticker excluded). 1H TradingView call, Finnhub earnings call, Phase 2.5 news search, and Phase 1 Fear & Greed are all soft (missing → default value, continue run).
 6. Keep output terse — no narration of tool calls, just the final summary block (§ Output Format).
@@ -223,15 +223,29 @@ Assemble a dossier per ticker:
 
 Goal: catch positive catalysts that justify a weak-technicals BUY, and negative catalysts that should override a strong-technicals BUY into a HOLD.
 
-**Scope:** After Phase 2 dossiers return, rank the surviving candidates by `volume_ratio` descending and take the **top 5**. Web-searches are expensive — don't burn them on the bottom of the list.
+**Scope:** After Phase 2 dossiers return, rank the surviving candidates by `volume_ratio` descending and take the **top 5**. News calls are bounded, not cheap — don't burn them on the bottom of the list.
 
-**Search call** (one per top-5 ticker, in parallel): use Claude Code's built-in `WebSearch` tool with query `"<TICKER> stock news today"`. Do NOT use WebFetch — the goal is headline breadth, not page content.
+**Primary source: Finnhub `/company-news`** (HTTP, called via bash, not MCP). Fire one `curl` per top-5 ticker in a single parallel bash block — up to 5 curls. Finnhub's free tier is 60 calls/minute; with 1 earnings call earlier in Phase 2 + up to 5 news calls here, every run consumes at most 6 Finnhub calls — well under the limit.
 
-**Parse:** From each search result, extract 2–3 headline strings that are clearly about the company (not sector ETFs, not unrelated ticker collisions). Concatenate `title` + short context if the title alone is ambiguous. Drop any headline older than ~48 hours based on the result timestamps. Store as `news_headlines: ["headline 1", "headline 2", "headline 3"]` on the dossier. If nothing relevant surfaces, set `news_headlines: []`.
+```bash
+from_date=$(date -u -v-2d +%Y-%m-%d 2>/dev/null || date -u -d '-2 days' +%Y-%m-%d)
+to_date=$(date -u +%Y-%m-%d)
+curl -sS "https://finnhub.io/api/v1/company-news?symbol=${TICKER}&from=${from_date}&to=${to_date}&token=${FINNHUB_API_KEY}"
+```
 
-**For candidates outside the top 5 by volume ratio:** set `news_headlines: []` — no search fired, not a failure.
+The response is a JSON array of items shaped `{ "headline": "...", "datetime": 1713100000, "source": "...", "url": "...", "related": "NVDA", ... }`. `datetime` is a unix epoch (seconds, UTC).
 
-**If a search errors** (network, rate limit, empty result): set `news_headlines: []` on that ticker and continue. Not grounds for exclusion.
+**Parse:**
+- Drop any item older than 48 hours (`now_epoch - datetime > 172800`). The `from_date` window is already 2 days, so this is belt-and-suspenders — but the endpoint sometimes returns items slightly outside the window.
+- Keep the `headline` string; discard url/source unless useful for disambiguation.
+- Take up to 3 items after the age filter. Drop anything that's clearly unrelated (sector ETF mentions that happen to tag the ticker, etc.) — this is a judgment call, not a keyword filter.
+- Store as `news_headlines: ["headline 1", "headline 2", "headline 3"]` on the dossier.
+
+**For candidates outside the top 5 by volume ratio:** set `news_headlines: []` — no curl fired, not a failure.
+
+**If a curl errors** (network, non-200, malformed JSON, empty array after filtering): set `news_headlines: []` on that ticker and continue. Not grounds for exclusion.
+
+**Manual fallback:** if Finnhub is systematically down (all 5 calls erroring), the documented manual recovery is to re-run Phase 2.5 using Claude Code's built-in `WebSearch` tool with query `"<TICKER> stock news today"` for each top-5 ticker. This is a manual fallback for outage recovery, not a primary code path — it returns noisier, snippet-shaped data that makes the negative-catalyst veto less reliable.
 
 **Phase 4 uses this signal directly:**
 - **Clear positive catalyst** (earnings beat, upgrade, FDA approval, major partnership, strong guidance, M&A) → upgrade confidence on a BUY by one notch (low→medium, medium→high). Can also justify a BUY on a technically weak setup.

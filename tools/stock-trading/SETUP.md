@@ -64,12 +64,18 @@ Open a Claude Code session in this repo and run each of these one at a time:
 1. **Alpaca** — call `mcp__alpaca__get_account_info`. Expect `{ equity, cash, status: "ACTIVE", ... }`.
 2. **TradingView — single-ticker TA.** Call `mcp__tradingview__coin_analysis` with `symbol: "AAPL"`, `exchange: "NASDAQ"`, `timeframe: "1D"`. Expect `rsi.value`, `market_sentiment.buy_sell_signal`, `stock_score`, `grade`, and ~20 other indicator blocks. Note: this tool has **no bulk equivalent** — Phase 2 calls it once per ticker, in parallel. Also note the exchange whitelist is `NASDAQ / NYSE / BIST / EGX / BURSA / HKEX`; anything else (including `AMEX` / `NYSEARCA`) silently falls back to the crypto default `KUCOIN` and returns "No data found". That's why the skill's Phase 1.5 morning screen is restricted to NYSE and NASDAQ.
 3. **TradingView — morning screener.** Call `mcp__tradingview__smart_volume_scanner` with `exchange: "NASDAQ"`, `rsi_range: "oversold"`, `min_volume_ratio: 1.5`, `min_price_change: 0`, `limit: 8`. Expect a list of oversold, high-relative-volume candidates. Repeat with `exchange: "NYSE"`. This is the tool that replaces the old static watchlist — there is no `screen_stocks` tool on this server despite what the README suggests.
-3. **Finnhub** (from a terminal in the repo root, with `.env` loaded):
+3. **Finnhub — earnings calendar** (from a terminal in the repo root, with `.env` loaded):
    ```bash
    set -a; source .env; set +a
    curl -sS "https://finnhub.io/api/v1/calendar/earnings?from=$(date -u +%Y-%m-%d)&to=$(date -u -v+3d +%Y-%m-%d 2>/dev/null || date -u -d '+3 days' +%Y-%m-%d)&token=${FINNHUB_API_KEY}" | head -c 400
    ```
    Expect a JSON object with an `earningsCalendar` array. If you get an HTML error page or `{"error":"..."}`, the key is wrong.
+
+4. **Finnhub — company news** (same `.env`, tests the Phase 2.5 call):
+   ```bash
+   curl -sS "https://finnhub.io/api/v1/company-news?symbol=AAPL&from=$(date -u -v-2d +%Y-%m-%d 2>/dev/null || date -u -d '-2 days' +%Y-%m-%d)&to=$(date -u +%Y-%m-%d)&token=${FINNHUB_API_KEY}" | head -c 400
+   ```
+   Expect a JSON array of items, each with `headline`, `datetime` (unix epoch seconds), `source`, and `url`. An empty `[]` is OK if AAPL happens to have no news in the last 48 hours — retry with a busier ticker like `NVDA`. If you get a 403, `{"error":"..."}`, or an HTML page, the free tier plan isn't covering this endpoint for your key. Per-run Finnhub call count: 1 earnings + up to 5 company-news = **6 total**, under the 60/minute free-tier limit.
 
 If any of the three fails, fix credentials / MCP config before proceeding — do not run the skill.
 
