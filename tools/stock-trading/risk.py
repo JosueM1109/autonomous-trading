@@ -1,9 +1,33 @@
 #!/usr/bin/env python3
 """Hard safety rules for the stock-trading skill.
 
-Two modes:
-  --snapshot   stdin: account JSON  → stdout: risk context JSON
-  --validate   stdin: order JSON    → stdout: approved/rejected JSON
+Four modes:
+  --snapshot   stdin: account JSON  -> stdout: risk context JSON.
+  --validate   stdin: order JSON    -> stdout: approved/rejected JSON.
+                 If approved, writes a `pending` reservation for
+                 (date, ticker, side) to logs/state.json and (for BUYs)
+                 increments `session_deployed` by the reserved notional.
+  --commit     stdin: {date, ticker, side} -> stdout: ok/error JSON.
+                 Promotes a pending reservation to `submitted` (permanent
+                 idempotency marker). For BUYs, also advances
+                 `session_deployed_confirmed`. Call this AFTER the order
+                 placement succeeds on the broker side.
+  --release    stdin: {date, ticker, side} -> stdout: ok/error JSON.
+                 Clears a pending reservation and, for BUYs, refunds the
+                 reserved notional back out of `session_deployed`. Call
+                 this if order placement fails, or at the end of a dry run
+                 to unwind the reservation.
+
+State machine per (date, ticker, side):
+    (nothing) --validate--> pending --commit--> submitted
+                                \
+                                 --release--> (nothing, session_deployed refunded)
+
+Idempotency: --validate rejects if the same (date, ticker, side) is either
+`submitted` (permanent) or already has a `pending` reservation. In practice
+this means a crash between --validate and --commit/--release locks that
+(ticker, side) until the date bucket rolls over the next day. This is a
+deliberate trade-off against adding TTLs or admin escape hatches.
 
 Owns logs/state.json exclusively. Uses fcntl.flock for atomic
 read-modify-write so concurrent invocations cannot corrupt state.
@@ -58,7 +82,28 @@ def write_state(state: dict) -> None:
 
 
 def day_bucket(state: dict, date: str) -> dict:
-    return state.setdefault(date, {"session_deployed": 0.0, "submitted": {}})
+    bucket = state.setdefault(
+        date,
+        {
+            "session_deployed": 0.0,
+            "session_deployed_confirmed": 0.0,
+            "pending": {},
+            "submitted": {},
+        },
+    )
+    # Forward-compat patch for older state.json shapes (pre-cluster-B).
+    bucket.setdefault("session_deployed", 0.0)
+    bucket.setdefault("session_deployed_confirmed", 0.0)
+    bucket.setdefault("pending", {})
+    bucket.setdefault("submitted", {})
+    return bucket
+
+
+def _find_pending(bucket: dict, ticker: str, side: str):
+    for entry in bucket["pending"].get(ticker, []):
+        if entry.get("side") == side:
+            return entry
+    return None
 
 
 def snapshot(account_json: dict, cfg: dict) -> dict:
@@ -118,23 +163,45 @@ def snapshot(account_json: dict, cfg: dict) -> dict:
 
 
 def validate(order: dict, cfg: dict) -> dict:
-    date = order["date"]
-    ticker = order["ticker"].upper()
-    side = order["side"].lower()
-    qty = int(order["qty"])
-    limit_price = float(order["limit_price"])
-    bid = float(order["bid"])
-    ask = float(order["ask"])
-    equity = float(order["account_equity"])
-    cash = float(order.get("account_cash", equity))
-    day_trades = int(order.get("day_trade_count", 0))
+    date = order.get("date")
+    ticker_raw = order.get("ticker")
+    side_raw = order.get("side")
+    if not isinstance(date, str) or not date:
+        return {"approved": False, "reason": "missing or invalid date"}
+    if not isinstance(ticker_raw, str) or not ticker_raw:
+        return {"approved": False, "reason": "missing or invalid ticker"}
+    if not isinstance(side_raw, str):
+        return {"approved": False, "reason": "missing or invalid side"}
+
+    ticker = ticker_raw.upper()
+    side = side_raw.lower()
+    if side not in ("buy", "sell"):
+        return {"approved": False, "reason": f"unknown side '{side_raw}'"}
+
+    try:
+        qty = int(order["qty"])
+        limit_price = float(order["limit_price"])
+        bid = float(order["bid"])
+        ask = float(order["ask"])
+        equity = float(order["account_equity"])
+        cash = float(order.get("account_cash", equity))
+        day_trades = int(order.get("day_trade_count", 0))
+    except (KeyError, TypeError, ValueError) as e:
+        return {"approved": False, "reason": f"invalid order payload: {e}"}
+
     existing_position = bool(order.get("existing_position", False))
+
+    if qty <= 0:
+        return {"approved": False, "reason": "invalid qty: must be positive integer"}
+    if limit_price <= 0:
+        return {"approved": False, "reason": "invalid limit_price: must be positive"}
+    if bid <= 0 or ask <= 0:
+        return {"approved": False, "reason": "invalid quote: bid and ask must be positive"}
+    if bid > ask:
+        return {"approved": False, "reason": f"invalid quote: bid {bid} > ask {ask}"}
 
     risk_cfg = cfg["risk"]
     notional = round(qty * limit_price, 2)
-
-    if side not in ("buy", "sell"):
-        return {"approved": False, "reason": f"unknown side '{order['side']}'"}
 
     if notional < risk_cfg["min_notional_usd"]:
         return {
@@ -150,7 +217,6 @@ def validate(order: dict, cfg: dict) -> dict:
             "reason": f"notional ${notional:.2f} exceeds per-position cap ${max_per_position:.2f} ({position_pct:.0f}% of equity)",
         }
 
-    # Tighten to 0.3% before going live — 1.5% is paper-trading only.
     midpoint = (bid + ask) / 2.0
     if midpoint <= 0:
         return {"approved": False, "reason": "invalid quote: midpoint <= 0"}
@@ -175,12 +241,18 @@ def validate(order: dict, cfg: dict) -> dict:
     with state_lock():
         state = read_state()
         bucket = day_bucket(state, date)
-        submitted = bucket["submitted"].get(ticker, [])
 
-        if side in submitted:
+        submitted_sides = bucket["submitted"].get(ticker, [])
+        if side in submitted_sides:
             return {
                 "approved": False,
                 "reason": f"idempotency: {side.upper()} {ticker} already submitted today",
+            }
+
+        if _find_pending(bucket, ticker, side) is not None:
+            return {
+                "approved": False,
+                "reason": f"idempotency: {side.upper()} {ticker} already has a pending reservation — commit or release first",
             }
 
         max_session_allocation = cash * risk_cfg["max_session_pct_of_cash"]
@@ -194,10 +266,109 @@ def validate(order: dict, cfg: dict) -> dict:
                 }
             bucket["session_deployed"] = round(projected, 2)
 
-        bucket["submitted"][ticker] = submitted + [side]
+        bucket["pending"].setdefault(ticker, []).append(
+            {"side": side, "notional": notional}
+        )
         write_state(state)
 
-    return {"approved": True, "reason": None}
+    return {"approved": True, "reason": None, "reserved_notional": notional}
+
+
+def _parse_ref(ref: dict):
+    date = ref.get("date")
+    ticker_raw = ref.get("ticker")
+    side_raw = ref.get("side")
+    if not isinstance(date, str) or not date:
+        return None, None, None, "missing or invalid date"
+    if not isinstance(ticker_raw, str) or not ticker_raw:
+        return None, None, None, "missing or invalid ticker"
+    if not isinstance(side_raw, str):
+        return None, None, None, "missing or invalid side"
+    side = side_raw.lower()
+    if side not in ("buy", "sell"):
+        return None, None, None, f"unknown side '{side_raw}'"
+    return date, ticker_raw.upper(), side, None
+
+
+def commit_order(ref: dict) -> dict:
+    date, ticker, side, err = _parse_ref(ref)
+    if err:
+        return {"ok": False, "error": err}
+
+    with state_lock():
+        state = read_state()
+        bucket = day_bucket(state, date)
+        entry = _find_pending(bucket, ticker, side)
+        if entry is None:
+            return {
+                "ok": False,
+                "error": f"no pending reservation for {side.upper()} {ticker} on {date}",
+            }
+        reserved_notional = float(entry.get("notional", 0.0))
+
+        bucket["pending"][ticker] = [
+            e for e in bucket["pending"][ticker] if e is not entry
+        ]
+        if not bucket["pending"][ticker]:
+            del bucket["pending"][ticker]
+
+        bucket["submitted"].setdefault(ticker, []).append(side)
+        if side == "buy":
+            bucket["session_deployed_confirmed"] = round(
+                float(bucket["session_deployed_confirmed"]) + reserved_notional,
+                2,
+            )
+        write_state(state)
+
+    return {
+        "ok": True,
+        "committed": {
+            "date": date,
+            "ticker": ticker,
+            "side": side,
+            "notional": reserved_notional,
+        },
+    }
+
+
+def release_order(ref: dict) -> dict:
+    date, ticker, side, err = _parse_ref(ref)
+    if err:
+        return {"ok": False, "error": err}
+
+    with state_lock():
+        state = read_state()
+        bucket = day_bucket(state, date)
+        entry = _find_pending(bucket, ticker, side)
+        if entry is None:
+            return {
+                "ok": False,
+                "error": f"no pending reservation for {side.upper()} {ticker} on {date}",
+            }
+        reserved_notional = float(entry.get("notional", 0.0))
+
+        bucket["pending"][ticker] = [
+            e for e in bucket["pending"][ticker] if e is not entry
+        ]
+        if not bucket["pending"][ticker]:
+            del bucket["pending"][ticker]
+
+        if side == "buy":
+            refunded = max(
+                0.0, float(bucket["session_deployed"]) - reserved_notional
+            )
+            bucket["session_deployed"] = round(refunded, 2)
+        write_state(state)
+
+    return {
+        "ok": True,
+        "released": {
+            "date": date,
+            "ticker": ticker,
+            "side": side,
+            "notional": reserved_notional,
+        },
+    }
 
 
 def main() -> int:
@@ -205,6 +376,8 @@ def main() -> int:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--snapshot", action="store_true")
     mode.add_argument("--validate", action="store_true")
+    mode.add_argument("--commit", dest="commit_mode", action="store_true")
+    mode.add_argument("--release", action="store_true")
     args = parser.parse_args()
 
     try:
@@ -213,10 +386,17 @@ def main() -> int:
         print(json.dumps({"ok": False, "error": f"invalid JSON on stdin: {e}"}))
         return 2
 
-    cfg = load_config()
-
     try:
-        result = snapshot(payload, cfg) if args.snapshot else validate(payload, cfg)
+        if args.snapshot:
+            cfg = load_config()
+            result = snapshot(payload, cfg)
+        elif args.validate:
+            cfg = load_config()
+            result = validate(payload, cfg)
+        elif args.commit_mode:
+            result = commit_order(payload)
+        else:
+            result = release_order(payload)
     except (KeyError, TypeError, ValueError) as e:
         print(json.dumps({"ok": False, "error": f"{type(e).__name__}: {e}"}))
         return 2

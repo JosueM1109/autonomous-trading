@@ -18,7 +18,7 @@ Three-layer split, strictly enforced:
 
 Thresholds, risk parameters, and the morning-screen config live in [tools/stock-trading/config.json](tools/stock-trading/config.json). **There is no static watchlist** — the candidate list is assembled fresh each run from `smart_volume_scanner` results + any open positions. `config.json` carries `_paper_note` / `_max_position_pct_note` fields that must be tightened before flipping `ALPACA_PAPER=false`.
 
-`risk.py --validate` mutates `logs/state.json` **even under `--dry-run`** (same code path). After a dry-run experiment, delete `logs/state.json` before the first real run of the day or idempotency will reject repeat orders.
+`risk.py` uses a three-step state machine for every order: `--validate` reserves a pending entry (and, for buys, pre-reserves `session_deployed`), `--commit` promotes it to a permanent `submitted` idempotency marker on successful placement, and `--release` unwinds the reservation on rejection/dry-run/error. **Every `--validate` must be paired with exactly one `--commit` or `--release`** — stale pending entries lock that `(date, ticker, side)` until the date bucket rolls over the next day. Dry runs call `--release` automatically after `--validate`, so they leave `logs/state.json` clean without manual intervention.
 
 ## Commands
 
@@ -33,10 +33,21 @@ There is no `make`, `npm`, or `pytest`. The only commands that exist:
 echo '{"date":"2026-04-13","account":{"equity":10000,"cash":5000,"day_trade_count":0,"trading_blocked":false,"account_blocked":false,"pattern_day_trader":false},"positions":[]}' \
   | python3 tools/stock-trading/risk.py --snapshot
 
+# --validate reserves a pending entry. Always pair with --commit OR --release.
 echo '{"date":"2026-04-13","ticker":"NVDA","side":"buy","qty":2,"limit_price":425.0,"bid":424.80,"ask":425.20,"account_equity":10000,"account_cash":5000,"day_trade_count":0,"existing_position":false}' \
   | python3 tools/stock-trading/risk.py --validate
 
-# Reset runtime state (do this after dry runs before the first real run of the day):
+echo '{"date":"2026-04-13","ticker":"NVDA","side":"buy"}' \
+  | python3 tools/stock-trading/risk.py --commit   # promote pending -> submitted
+
+echo '{"date":"2026-04-13","ticker":"NVDA","side":"buy"}' \
+  | python3 tools/stock-trading/risk.py --release  # clear pending, refund session_deployed
+
+# Run the risk.py test suite (stdlib unittest, no deps):
+python3 -m unittest tests.test_risk -v
+
+# Reset runtime state (optional — dry runs no longer leave stale state since
+# the skill auto-releases pending entries, but this is still safe):
 rm -f logs/state.json logs/.state.lock
 : > logs/trading-log.jsonl
 

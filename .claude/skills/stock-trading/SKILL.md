@@ -296,7 +296,7 @@ For each BUY/SELL, in sequence:
    - Buy: `floor(max_per_position / limit_price)`; if `qty * limit_price < 50`, skip with reason "notional below $50 minimum".
    - Sell: use the full position qty (or the qty Josue confirms if partial).
 
-3. **Validate:**
+3. **Validate (reserves a pending entry in state.json):**
    ```bash
    python3 tools/stock-trading/risk.py --validate
    ```
@@ -318,6 +318,8 @@ For each BUY/SELL, in sequence:
    ```
    If `approved: false`, log the reason in `risk_overrides` and skip this ticker. **Do not retry with different parameters.**
 
+   If `approved: true`, the response carries a `reserved_notional` field and `risk.py` has written a `pending` entry in `logs/state.json`. This reservation must be either **committed** (step 5, after a successful order placement) or **released** (on dry-run, on Alpaca rejection, or on any other skip path). Leaving a stale `pending` entry locks that `(date, ticker, side)` until the date bucket rolls over the next day.
+
 4. **Place order (if approved and not `dry_run`):**
    `mcp__alpaca__place_stock_order`
    - `symbol`, `side` (`buy`/`sell`), `qty`
@@ -326,6 +328,25 @@ For each BUY/SELL, in sequence:
    - `limit_price`: the computed value
 
    Record the returned order id or the placement error.
+
+5. **Commit or release the pending reservation:**
+   - On **dry-run**: always release — the reservation is immediately unwound so dry-runs leave `state.json` looking like the run never happened. No Alpaca call is made.
+     ```bash
+     python3 tools/stock-trading/risk.py --release
+     ```
+     stdin: `{"date": "2026-04-13", "ticker": "NVDA", "side": "buy"}`
+   - On **successful order placement**: commit — the pending entry is promoted to `submitted` (permanent idempotency), and `session_deployed_confirmed` advances for buys.
+     ```bash
+     python3 tools/stock-trading/risk.py --commit
+     ```
+     stdin: `{"date": "2026-04-13", "ticker": "NVDA", "side": "buy"}`
+   - On **Alpaca rejection / placement error**: release — the reservation is unwound and `session_deployed` is refunded, so the session cap can be spent elsewhere.
+     ```bash
+     python3 tools/stock-trading/risk.py --release
+     ```
+     Same stdin shape. Log the placement error in the run dossier's `orders` section.
+
+   **Never skip step 5.** If you validated a ticker, you must resolve the pending entry — either via `--commit` after a successful placement or via `--release` otherwise.
 
 ### Phase 6 — Log (subprocess, skipped if dry run)
 ```bash
@@ -359,12 +380,8 @@ See Output Format below.
 If the trigger includes `--dry-run`:
 - Phases 0–5 run in full, including `risk.py --validate` calls (so you see what *would* have been approved).
 - **Phase 5 step 4** (the `mcp__alpaca__place_stock_order` call) is skipped.
+- **Phase 5 step 5** calls `risk.py --release` instead of `--commit`, so every pending reservation written during `--validate` is immediately unwound. At the end of a dry run, `logs/state.json` looks like the run never happened — no stale pending entries, no inflated `session_deployed`. The old "`rm -f logs/state.json` after every dry run" ritual is no longer required.
 - Phase 6 (logger.py) is skipped entirely — the log is NOT touched.
-- `risk.py --validate` DOES mutate `logs/state.json` even in dry run (it's the same code path), so after a dry-run experiment run:
-  ```bash
-  rm -f logs/state.json
-  ```
-  before the first real run of the day.
 - Phase 7 summary shows a "DRY RUN — nothing placed" banner.
 
 **Dry-run after hours is largely decorative.** IEX bid/ask spreads balloon to 5–10% outside RTH, which trips the 0.5% spread cap on every ticker and skips the entire watchlist. Pre-market volume and intraday fields are also thin or absent. Use after-hours dry runs to verify MCP connectivity and dossier shape — not to evaluate the reasoning layer. For real reasoning validation, dry-run between 09:30 and 16:00 ET.

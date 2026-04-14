@@ -93,12 +93,26 @@ Expected output (keys in any order):
 These values follow the frozen `experiment_id: exp-001` paper caps (`0.20 * $10k = $2k` per position, `0.80 * $5k = $4k` per session). If you see `1000.0 / 2500.0` or `2500.0 / 5000.0`, `config.json` has drifted from the experiment baseline — check whether `experiment_id` was bumped and risk caps were changed.
 
 ```bash
-# risk.py --validate (approved)
+# risk.py --validate (approved) — reserves a pending entry + session_deployed
 echo '{"date":"2026-04-13","ticker":"NVDA","side":"buy","qty":2,"limit_price":425.0,"bid":424.80,"ask":425.20,"account_equity":10000,"account_cash":5000,"day_trade_count":0,"existing_position":false}' \
   | python3 tools/stock-trading/risk.py --validate
 ```
 
-Expected: `{"approved": true, "reason": null}`. This will also write `logs/state.json`. **Delete that file before the first real run** so the session state starts clean:
+Expected: `{"approved": true, "reason": null, "reserved_notional": 850.0}`. This writes a `pending` entry to `logs/state.json`. Every validate must be paired with exactly one commit OR release:
+
+```bash
+# Happy path: order placed successfully, promote pending -> submitted
+echo '{"date":"2026-04-13","ticker":"NVDA","side":"buy"}' \
+  | python3 tools/stock-trading/risk.py --commit
+# Expected: {"ok": true, "committed": {..., "notional": 850.0}}
+
+# Rollback path: order rejected by broker, refund session_deployed
+echo '{"date":"2026-04-13","ticker":"NVDA","side":"buy"}' \
+  | python3 tools/stock-trading/risk.py --release
+# Expected: {"ok": true, "released": {..., "notional": 850.0}}
+```
+
+After the smoke tests, reset state so the first real run starts clean:
 
 ```bash
 rm -f logs/state.json logs/.state.lock
