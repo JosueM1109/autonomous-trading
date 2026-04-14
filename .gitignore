@@ -12,3 +12,4 @@ logs/state.json
 logs/.state.lock
 !logs/.gitkeep
 tools/stock-trading/__pycache__/
+tests/__pycache__/

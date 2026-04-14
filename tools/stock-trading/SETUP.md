@@ -152,7 +152,44 @@ Review the output. If the screen returned a sensible candidate list, every survi
 
 ---
 
-## 7. Promotion checklist (before going live)
+## 8. Outcome evaluation
+
+After you've made a few paper runs and want to see how the decisions turned out:
+
+```
+run the trading skill --evaluate
+```
+
+(Or `evaluate trades` / `run the evaluator` — the aliases map to the same mode.) This is a read-only pass that:
+
+- Walks `logs/trading-log.jsonl` to find every placed order.
+- Walks `logs/outcomes.jsonl` (created on first run) to get the current state of each decision.
+- Fires parallel `mcp__alpaca__get_order_by_id` and `mcp__alpaca__get_stock_bars` calls to advance each decision's state through `pending_fill → filled → t0 → t1 → t5 → t20`.
+- Appends new state transitions to `logs/outcomes.jsonl` via `outcomes_reducer.py --append`.
+- Prints a plain-text summary: fill slippage, mean T+5 returns, mean returns by confidence label, organic-BUY vs minimum-trade-override-BUY comparison, count of decisions still pending.
+
+Evaluate Mode does NOT place orders, does NOT call `risk.py`, and does NOT touch `trading-log.jsonl`. It's safe to run as often as you like — re-running on the same day is a no-op for any state that can't yet advance.
+
+The standalone reducer is useful for debugging:
+
+```bash
+# dump the current work queue
+echo '{}' | python3 tools/stock-trading/outcomes_reducer.py --current-state
+
+# append a synthetic row (use only for testing — in normal use, the skill calls this)
+echo '{"lines":[{"run_id":"test","ticker":"TEST","outcome_state":"filled"}]}' \
+  | python3 tools/stock-trading/outcomes_reducer.py --append
+```
+
+For a human-readable view of a past run (without touching Alpaca at all):
+
+```bash
+python3 tools/stock-trading/run-summary.py                 # most recent run
+python3 tools/stock-trading/run-summary.py --since 2026-04-14
+python3 tools/stock-trading/run-summary.py --experiment exp-002
+```
+
+## 9. Promotion checklist (before going live)
 
 Do **not** flip `ALPACA_PAPER=false` until:
 

@@ -20,6 +20,8 @@ The skill reads `experiment_id` from config in Phase 0 and passes it through to 
 
 Add `--dry-run` to any trigger to run steps 1–5 without placing orders or writing the log.
 
+Add `--evaluate` to any trigger (e.g. `run the trading skill --evaluate`) to run **Evaluate Mode** instead of the morning routine — a read-only walk over past decisions that advances their outcome state machine toward T+20. Evaluate Mode does not place orders, does not call `risk.py`, does not touch `trading-log.jsonl`, and does not re-read `config.json`'s risk block. See § Evaluate Mode below. Aliases: `evaluate trades`, `run the evaluator`.
+
 ---
 
 ## Required MCP Servers
@@ -510,14 +512,112 @@ Going live is a one-line change. Going back to paper is the same one-line change
 
 ---
 
+## Evaluate Mode
+
+Evaluate Mode is how the experiment measures itself. It walks the morning routine's audit log, pulls actual fill prices and post-fill closes from Alpaca, and builds an outcomes timeline per decision that can later be aggregated into hit rates, mean returns, and confidence-label calibration curves.
+
+**Trigger:** `run the trading skill --evaluate` (or `evaluate trades` / `run the evaluator`).
+
+**What Evaluate Mode does NOT do:**
+- Does not place orders.
+- Does not call `risk.py` in any mode.
+- Does not read `config.json`'s `risk` or `thresholds` or `ranking` blocks.
+- Does not append to `trading-log.jsonl`.
+- Does not require market hours — it only touches the Alpaca orders and bars endpoints, both of which are available around the clock.
+
+**Outcomes state machine (per `(run_id, ticker)`):**
+
+```
+pending_fill --> filled --> t0 --> t1 --> t5 --> t20
+     |
+     +-> unfilled_cancelled (terminal — limit order cancelled/expired without filling)
+```
+
+- `pending_fill`: the order was placed but we have not yet confirmed a fill. Default state for any placed decision with no outcomes rows yet.
+- `filled`: Alpaca confirms `filled_avg_price` and `filled_at`. Compute `fill_slippage_pct` = (`fill_price` − `limit_price`) / `limit_price` × 100.
+- `t0`: close price on the fill date. Compute `return_t0_pct` = (`close_t0` − `fill_price`) / `fill_price` × 100.
+- `t1/t5/t20`: close price 1/5/20 trading days after the fill date. Returns computed the same way, all vs `fill_price`.
+- `unfilled_cancelled`: if Alpaca reports `status in {cancelled, expired, rejected}` without a fill, emit this terminal row. No returns are computed.
+
+Each state transition becomes one new line in `logs/outcomes.jsonl`. The file is append-only; later states for the same `(run_id, ticker)` never overwrite earlier rows, they append alongside. The reducer (`outcomes_reducer.py`) picks the most-advanced state when building the work queue on the next run.
+
+**Phases:**
+
+### E0 — load work queue
+
+```bash
+python3 tools/stock-trading/outcomes_reducer.py --current-state
+```
+
+stdin: `{"log_path": "logs/trading-log.jsonl", "outcomes_path": "logs/outcomes.jsonl"}` (both defaults, can omit).
+
+stdout: `{"decisions": [ { run_id, ticker, order_id, experiment_id, ranking_version, confidence, min_trade_override, side, qty, limit_price, notional, current_state, next_state, fill_price, filled_at }, ... ]}`
+
+If `decisions` is empty, print `Nothing to evaluate — every placed decision is at a terminal state.` and end the run. Do not proceed to E1–E4.
+
+### E1 — fetch order fills (parallel, one message)
+
+For every decision with `next_state == "filled"`, fire `mcp__alpaca__get_order_by_id` in parallel. Each returns the order record with fields like `status`, `filled_avg_price`, `filled_at`, `filled_qty`.
+
+Map each response:
+- `status == "filled"` and `filled_avg_price` present → emit an outcomes row with `outcome_state: "filled"`, `fill_price: <filled_avg_price>`, `fill_qty: <filled_qty>`, `filled_at: <filled_at>`, `fill_slippage_pct: <computed>`, `prior_state: "pending_fill"`.
+- `status in {canceled, expired, rejected}` → emit an outcomes row with `outcome_state: "unfilled_cancelled"`, `prior_state: "pending_fill"`. Terminal.
+- `status in {new, accepted, partially_filled, pending_new, ...}` → do nothing this pass; the decision stays at `pending_fill` and will be retried on the next evaluate run.
+- MCP error or missing order → do nothing, leave at `pending_fill`, note in the E4 summary.
+
+### E2 — fetch historical bars (parallel, one message)
+
+For every decision whose `next_state` is `t0` / `t1` / `t5` / `t20`, fire `mcp__alpaca__get_stock_bars` in parallel. Batch per ticker: one call per ticker covering the range from the fill date through `next_state_target_date + 5 calendar days` of headroom, at `timeframe: "1Day"`. The wider-than-strictly-needed window lets a single call satisfy multiple state advances if the decision has been dormant for days or weeks.
+
+From the returned bars:
+- `t0`: close of the first trading day that matches `fill_date`. Usually the same calendar day as `filled_at`.
+- `t1`: close 1 trading day after `t0`. Skip weekends/holidays — the bar itself already does this; use the second bar in the returned sequence.
+- `t5`: close 5 trading days after `t0`. Use the 6th bar in the sequence (index 5).
+- `t20`: close 20 trading days after `t0`. Use the 21st bar (index 20).
+
+For each state where the required bar is actually present in the response, emit one outcomes row with the appropriate fields (`close_tN`, `return_tN_pct`, `tN_date`, `outcome_state: "tN"`, `prior_state: <previous>`). If the bar isn't yet available (e.g. the 20th post-fill trading day is still in the future), skip that state — it will advance on a later evaluate run.
+
+**Important:** Evaluate Mode can advance multiple states in one pass if enough time has elapsed. Example: a run from 40 calendar days ago that was last evaluated 30 days ago is now at `t0` in outcomes.jsonl. In one E2 call, `t1`, `t5`, and `t20` can all be computed from the same bar response. Emit all three rows in E3, one per state.
+
+### E3 — append to outcomes.jsonl
+
+```bash
+python3 tools/stock-trading/outcomes_reducer.py --append
+```
+
+stdin: `{"lines": [ { row1 }, { row2 }, ... ]}`
+
+The reducer appends each line with `fcntl.flock` coordination, same crash-safety story as `logger.py`.
+
+### E4 — summary
+
+Print a plain-text summary to Josue. Sections:
+
+- **Work queue processed:** counts by `next_state` attempted (e.g. "pending_fill → filled: 3 advanced, 1 stuck") and by `outcome_state` after this pass.
+- **Outcomes so far (all runs):**
+  - Mean `fill_slippage_pct`.
+  - Mean `return_t5_pct` across all decisions that have reached `t5` or later.
+  - Mean `return_t5_pct` split by `min_trade_override: true` vs `false` — this is the primary experimental measurement (does the minimum-trade rule produce worse outcomes than organic picks?).
+  - Mean `return_t5_pct` split by `confidence: high` / `medium` / `low`, with hit rate (% positive).
+  - Count of decisions that terminated as `unfilled_cancelled`.
+- **Still pending:** count of decisions still at `pending_fill` and at each intermediate state, with the earliest `run_id` in each bucket so Josue knows how old the stale-est one is.
+
+Plain text only — no color codes, no unicode box drawing. Output should be pipe-safe so it can be redirected to a file.
+
+---
+
 ## Files
 
 | Path | Purpose |
 |---|---|
-| `tools/stock-trading/config.json` | Watchlist, strategy thresholds, `force_eod_close` toggle |
-| `tools/stock-trading/risk.py` | Hard safety rules. `--snapshot` and `--validate` modes. Owns `logs/state.json`. |
+| `tools/stock-trading/config.json` | Watchlist, strategy thresholds, `ranking` weights, `experiment_id`, `force_eod_close` toggle |
+| `tools/stock-trading/risk.py` | Hard safety rules. `--snapshot` / `--validate` / `--commit` / `--release` modes. Owns `logs/state.json`. |
 | `tools/stock-trading/logger.py` | Append-only JSONL writer with `fcntl.flock` crash safety |
+| `tools/stock-trading/outcomes_reducer.py` | Evaluate Mode reducer — `--current-state` emits the work queue, `--append` writes new outcomes rows |
+| `tools/stock-trading/run-summary.py` | Human-readable run report generator (`--since`, `--experiment` filters) |
 | `tools/stock-trading/SETUP.md` | One-time MCP registration + API keys + first-run verification |
 | `.claude/skills/stock-trading/SKILL.md` | This file |
 | `logs/trading-log.jsonl` | Append-only run log (gitignored) |
+| `logs/outcomes.jsonl` | Append-only per-decision outcomes timeline (gitignored) |
 | `logs/state.json` | Per-day idempotency + session-deployed tracker (gitignored) |
+| `tests/test_risk.py` | Unittest suite for `risk.py` — run via `python3 -m unittest tests.test_risk -v` |

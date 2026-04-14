@@ -46,6 +46,14 @@ echo '{"date":"2026-04-13","ticker":"NVDA","side":"buy"}' \
 # Run the risk.py test suite (stdlib unittest, no deps):
 python3 -m unittest tests.test_risk -v
 
+# Human-readable view of past runs (doesn't touch Alpaca):
+python3 tools/stock-trading/run-summary.py                # most recent run
+python3 tools/stock-trading/run-summary.py --since 2026-04-14
+python3 tools/stock-trading/run-summary.py --experiment exp-002
+
+# Debug the Evaluate Mode work queue (standalone; doesn't call MCP):
+echo '{}' | python3 tools/stock-trading/outcomes_reducer.py --current-state
+
 # Reset runtime state (optional — dry runs no longer leave stale state since
 # the skill auto-releases pending entries, but this is still safe):
 rm -f logs/state.json logs/.state.lock
