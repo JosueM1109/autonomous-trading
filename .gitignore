@@ -1,0 +1,13 @@
+.env
+CLAUDE.local.md
+.claude/settings.local.json
+node_modules/
+
+# macOS
+.DS_Store
+
+# Stock trading runtime state + audit log
+logs/trading-log.jsonl
+logs/state.json
+logs/.state.lock
+tools/stock-trading/__pycache__/

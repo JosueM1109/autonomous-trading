@@ -1,0 +1,37 @@
+{
+  "_note": "Watchlist is now DYNAMIC — assembled each run from Phase 1.5 (morning screen) + any open positions. No fixed ticker list lives in config anymore. See .claude/skills/stock-trading/SKILL.md Phase 1.5 for the screen mechanics. Providers: Alpaca (account + snapshots), TradingView MCP coin_analysis (one call per ticker — no bulk endpoint), Finnhub /calendar/earnings (one batched HTTP call).",
+  "screen": {
+    "max_candidates": 15,
+    "min_price": 5.00,
+    "exchanges": ["NYSE", "NASDAQ"],
+    "rsi_range": "any",
+    "min_volume_ratio": 1.5,
+    "min_price_change": 0,
+    "_filter_notes": "rsi_range='any' casts a wide net — both oversold reversals and breakout momentum surface in one pass, and Phase 4 ranks them. min_volume_ratio=1.5 is a RELATIVE multiplier vs the scanner's baseline, not an absolute share count. max_candidates=15 per exchange gives Phase 4 enough names to rank meaningfully. The only client-side floor is min_price (penny-stock guard) applied after coin_analysis returns a price."
+  },
+  "thresholds": {
+    "rsi_oversold": 35,
+    "rsi_overbought": 70,
+    "stop_loss_pct": 0.05,
+    "take_profit_pct": 0.08,
+    "volume_ratio_min": 1.5,
+    "earnings_blackout_days": 3,
+    "stock_score_min": 55
+  },
+  "risk": {
+    "max_position_pct_of_equity": 0.25,
+    "_max_position_pct_note": "paper trading — tighten to 0.10 before going live. Raised 0.20→0.25 on 2026-04-14 to fit 4-position deploy of residual cash after AMDG fill.",
+    "max_session_pct_of_cash": 1.00,
+    "_max_session_pct_note": "paper trading — tighten to 0.50 before going live. Temporarily raised to 1.00 on 2026-04-14 to deploy residual cash after AMDG fill.",
+    "min_notional_usd": 50,
+    "max_spread_pct_of_midpoint": 0.015,
+    "_max_spread_pct_note": "paper trading — tighten to 0.003 (0.3%) before going live",
+    "pdt_threshold_equity": 25000,
+    "pdt_max_day_trades": 3
+  },
+  "toggles": {
+    "force_eod_close": false,
+    "force_eod_close_cutoff_local": "15:45",
+    "force_eod_close_timezone": "America/New_York"
+  }
+}
