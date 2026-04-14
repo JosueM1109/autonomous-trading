@@ -1,6 +1,6 @@
 {
-  "experiment_id": "exp-001",
-  "_experiment_id_note": "Canary for experiment integrity. Any change to the `risk`, `thresholds`, or `ranking` blocks requires bumping this and starting a fresh run of 5 paper sessions. See CLAUDE.md § Experiment discipline.",
+  "experiment_id": "exp-002",
+  "_experiment_id_note": "Canary for experiment integrity. Any change to the `risk`, `thresholds`, or `ranking` blocks requires bumping this and starting a fresh run of 5 paper sessions. See CLAUDE.md § Experiment discipline. Bumped from exp-001 on 2026-04-14 to capture R7 (minimum-trade override waiver), R8 (SELL 2-of-3 soft rule), and R9 (versioned ranking weights).",
   "_note": "Watchlist is now DYNAMIC — assembled each run from Phase 1.5 (morning screen) + any open positions. No fixed ticker list lives in config anymore. See .claude/skills/stock-trading/SKILL.md Phase 1.5 for the screen mechanics. Providers: Alpaca (account + snapshots), TradingView MCP coin_analysis (one call per ticker — no bulk endpoint), Finnhub /calendar/earnings (one batched HTTP call).",
   "screen": {
     "max_candidates": 15,
@@ -35,5 +35,16 @@
     "force_eod_close": false,
     "force_eod_close_cutoff_local": "15:45",
     "force_eod_close_timezone": "America/New_York"
+  },
+  "ranking": {
+    "version": "v1",
+    "_note": "Weights for the Phase 4 candidate ranking heuristic. Sum must be 1.0. Any change bumps experiment_id.",
+    "weights": {
+      "stock_score": 0.35,
+      "ta_alignment": 0.30,
+      "volume_ratio": 0.20,
+      "rsi_suitability": 0.10,
+      "news": 0.05
+    }
   }
 }

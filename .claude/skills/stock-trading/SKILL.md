@@ -273,11 +273,11 @@ stdout: risk context. Read these fields:
 > **MINIMUM TRADE RULE**
 >
 > Every run must place **at least one BUY order** unless one of the following is true:
-> (a) `dry_run=true`, (b) `trading_blocked=true` or `account_blocked=true`, or (c) **all** candidates failed their dossier fetch (the list is genuinely empty).
+> (a) `dry_run=true`, (b) `trading_blocked=true` or `account_blocked=true`, (c) **all** candidates failed their dossier fetch (the list is genuinely empty), or (d) **too-garbage-to-trade waiver**: the top-ranked candidate by the Phase 4 ranking heuristic has `stock_score < 40` AND `ta_summary ∈ {SELL, STRONG_SELL}`. When (d) fires, record `min_trade_override_waived: true` on the run dossier with reason `"top candidate below garbage threshold"`, and still emit HOLD for every candidate. This waiver should fire on fewer than 2% of runs — if it fires on more than 5%, the morning screen is broken, not the rule.
 >
-> If Phase 4 reasoning produces all HOLDs and none of the exemptions above apply, **override the weakest HOLD to a BUY on the highest-ranked candidate by `stock_score`** (ties broken by `ta_summary` BUY/STRONG_BUY, then by `volume_ratio`). State clearly in the decision rationale that this is a minimum-trade override — the audit log needs to distinguish "organic BUY based on confluence" from "override BUY because the run would have been empty".
+> If Phase 4 reasoning produces all HOLDs and none of the exemptions above apply, **override the weakest HOLD to a BUY on the highest-ranked candidate by the Phase 4 ranking heuristic** (see below). State clearly in the decision rationale that this is a minimum-trade override — the audit log needs to distinguish "organic BUY based on confluence" from "override BUY because the run would have been empty". Set `min_trade_override: true` on that decision.
 >
-> **Why this exists:** this is a paper account. The cost of a bad trade is zero. The cost of a run with no trades is a useless data point — the whole purpose of the skill is to observe Claude's live reasoning under real market conditions, and a run full of HOLDs produces nothing to learn from. A weak setup traded with real discipline beats a strong setup that never happened.
+> **Why this exists:** this is a paper account. The cost of a bad trade is zero. The cost of a run with no trades is a useless data point — the whole purpose of the skill is to observe Claude's live reasoning under real market conditions, and a run full of HOLDs produces nothing to learn from. A weak setup traded with real discipline beats a strong setup that never happened. The waiver exists only for the rare case where "weak setup" becomes "setup so bad it contaminates the data" — a candidate that's both strongly bearish (`SELL`/`STRONG_SELL`) AND low-quality (`stock_score < 40`).
 
 For every ticker with a complete dossier, decide BUY / SELL / HOLD with a short rationale and a confidence label (high / medium / low). There are no hard numeric gates — weigh signals holistically and pick the best available trade.
 
@@ -304,16 +304,28 @@ There is always a best option. Rank all candidates and BUY the top one (subject 
 - `blocked_tickers` from risk snapshot — no pyramiding buys. Hard constraint.
 - `pdt_headroom` — if 0 (and not unlimited), BUY is blocked for opening new positions. Hard constraint.
 
-Ranking heuristic when nothing jumps out: weight `stock_score` (35%) + alignment of `ta_summary`/`ta_summary_1h` with intended direction (30%) + `volume_ratio` (20%) + `rsi_14` suitability for the setup type (10%) + news tone (5%, with negative catalysts acting as a hard veto rather than a weighted deduction). Pick the top-ranked non-blocked, non-earnings, non-negative-news candidate. If every candidate has earnings within 3 days, pick the one with the cleanest structural read and state the earnings risk in the rationale.
+**Ranking heuristic (R9 — versioned in config):** the Phase 4 ranking formula is sourced from `config.json` → `ranking.weights`. Version `v1` uses `stock_score` (35%) + alignment of `ta_summary`/`ta_summary_1h` with intended direction (30%) + `volume_ratio` (20%) + `rsi_14` suitability for the setup type (10%) + news tone (5%, with negative catalysts acting as a hard veto rather than a weighted deduction). Any change to these weights requires bumping `experiment_id` and `ranking.version` in the same edit. The skill must include `ranking_version: "<value from config>"` in the Phase 6 logger payload so downstream analysis can segment decisions by ranking generation.
+
+Pick the top-ranked non-blocked, non-earnings, non-negative-news candidate. If every candidate has earnings within 3 days, pick the one with the cleanest structural read and state the earnings risk in the rationale.
 
 **A weak setup is still tradeable on a paper account.** The goal of this phase is to exercise judgment under uncertainty, not to sit out.
 
-**SELL — any one is sufficient:**
-- RSI(14) above `thresholds.rsi_overbought` (default 70) on an existing position.
-- `ta_summary` is `SELL` or `STRONG_SELL` on an existing position.
-- `stock_score` dropped below `thresholds.stock_score_min` (default 55) since entry AND `ta_summary` is `NEUTRAL` or worse.
+**SELL — hard rules fire on their own; soft rules need 2-of-3 confluence.**
+
+**Hard rules (any one is sufficient):**
+- `ta_summary` is `STRONG_SELL` on an existing position. Single-signal STRONG_SELL is decisive.
 - Existing position down ≥ `thresholds.stop_loss_pct` (default 5%) from entry.
 - Existing position up ≥ `thresholds.take_profit_pct` (default 8%) from entry.
+- `force_eod_close_active` is true — see the override note below.
+
+**Soft rules (require 2-of-3 to fire together before emitting SELL on technical deterioration alone):**
+- `ta_summary` is `SELL` (not STRONG_SELL).
+- `stock_score` dropped below `thresholds.stock_score_min` (default 55) since entry AND `ta_summary` is `NEUTRAL` or worse.
+- RSI(14) above `thresholds.rsi_overbought` (default 70).
+
+**Rationale for the soft split (R8):** any one of those three conditions can fire on a single-day technical wobble and trigger a premature exit. Requiring two of the three to align demands actual confluence — e.g. overbought RSI *and* a deteriorating composite score, or a SELL summary *and* an overbought reading. The hard rules still fire on their own because stop-loss, take-profit, and STRONG_SELL are categorically different from "technicals look a bit soft today".
+
+Log every SELL decision with the triggering rule(s) in the rationale — a reader of `trading-log.jsonl` should be able to see "2-of-3: SELL summary + RSI overbought" or "hard: take-profit hit" directly.
 
 **HOLD — now valid only in these narrow cases:**
 - The ticker's dossier fetch failed (missing fields, provider error, below price floor). This is functionally the same as SKIP; it stays labeled HOLD for the audit log.
@@ -400,14 +412,16 @@ stdin: one JSON object with the full run dossier:
 {
   "run_id": "<ISO8601 UTC>",
   "timestamp": "<ISO8601 UTC>",
-  "experiment_id": "exp-001",
+  "experiment_id": "exp-002",
+  "ranking_version": "v1",
+  "min_trade_override_waived": false,
   "mode": "paper" | "live",
   "dry_run": false,
   "account_snapshot": { ... },
   "market_sentiment": { "fear_greed_score": 42, "fear_greed_rating": "fear", "phase4_bias": "lean toward buys" },
   "screened": { "candidates": ["NVDA","AMD","..."], "open_positions": [], "final": ["NVDA","AMD"], "dropped_below_price_floor": [] },
   "dossiers": { "NVDA": { "rsi_14": 28.4, "ta_summary": "BUY", "stock_score": 72, "grade": "Good", "rsi_1h": 35.1, "ta_summary_1h": "BUY", "premarket_change_pct": 0.8, "volume_ratio": 1.7, "earnings_within_3d": false, "news_headlines": ["NVDA raises FY guidance", "Analyst upgrade to buy"], "bid": 424.8, "ask": 425.2, "last": 425.0 }, "MSFT": { "error": "..." } },
-  "decisions": [ { "ticker", "action", "confidence", "rationale" }, ... ],
+  "decisions": [ { "ticker", "action", "confidence", "rationale", "min_trade_override": false }, ... ],
   "orders": [ { "ticker", "status", "order_id?", "side", "qty", "limit_price", "notional" }, ... ],
   "risk_overrides": [ { "ticker", "reason" }, ... ]
 }

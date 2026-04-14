@@ -177,7 +177,7 @@ Everything strategy-related lives in [tools/stock-trading/config.json](tools/sto
 
 ```json
 {
-  "experiment_id": "exp-001",
+  "experiment_id": "exp-002",
   "screen": {
     "max_candidates": 15,
     "min_price": 5.00,
