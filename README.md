@@ -69,6 +69,7 @@ Phase definitions are authoritative in [.claude/skills/stock-trading/SKILL.md](.
 | Phase | What happens | Fires in parallel with |
 |---|---|---|
 | 0 | Read `config.json`, parse flags, compute NY date, check `force_eod_close` cutoff | — |
+| 0.5 | TradingView MCP health check on AAPL/NASDAQ — abort run on error or KUCOIN silent fallback | — |
 | 1 | Alpaca account / positions / clock + CNN Fear & Greed curl | Phase 1.5 |
 | 1.5 | `smart_volume_scanner` once per exchange (NYSE, NASDAQ), merge with open positions, dedupe, take top N | Phase 1 |
 | 2 | Per-ticker: two `coin_analysis` calls (1D + 1H) + one batched Alpaca `get_stock_snapshot` + one Finnhub earnings curl | internally parallel |

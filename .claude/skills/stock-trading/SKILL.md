@@ -70,6 +70,35 @@ If any required MCP server is not connected, refuse to run and tell Josue which 
 - Compute today's date in `America/New_York` (used as the idempotency key).
 - If `toggles.force_eod_close` is `true` AND current NY time is past `toggles.force_eod_close_cutoff_local` (default `15:45`), set `force_eod_close_active=true`.
 
+### Phase 0.5 — TradingView MCP health check (fail-fast)
+
+Before any data fan-out, fire one canary call to confirm TradingView MCP is actually returning stock data (not silently falling back to its `KUCOIN` crypto default):
+
+```
+mcp__tradingview__coin_analysis
+  symbol: "AAPL"
+  exchange: "NASDAQ"
+  timeframe: "1D"
+```
+
+AAPL on NASDAQ is the documented known-working canary (`SETUP.md` § 4). Do **not** use SPY or QQQ — both list on NYSEARCA, which is not in TradingView's whitelist and silently falls back to KUCOIN.
+
+**The call is considered failed if any of these is true:**
+- The MCP returns an error, timeout, or non-200 status.
+- The response body contains the string `"No data found"` (the documented KUCOIN fallback symptom).
+- `stock_score`, `market_sentiment.buy_sell_signal`, or `rsi.value` is missing from the response.
+
+**On failure: abort the run immediately**, before Phase 1 fires. Emit:
+
+```
+TradingView MCP health check failed on AAPL/NASDAQ (<error detail>).
+Aborting. Run `claude mcp list` and check that `tradingview` shows ✓ Connected.
+```
+
+Do not write to `logs/trading-log.jsonl`, do not touch `logs/state.json`, do not call `risk.py`. This is a fail-fast check — its whole purpose is to stop the run before it produces a silently empty dossier set that would either (a) make Phase 2 hard-exclude every ticker, or (b) trip the minimum-trade rule's "all candidates failed their dossier fetch" exemption, both of which produce uselessly empty runs.
+
+**On success: proceed to Phase 1.** Do not reuse the AAPL dossier as an actual Phase 2 candidate — this call is purely a canary and its payload is discarded.
+
 ### Phase 1 — Account snapshot + market sentiment (parallel, one message)
 Fire all of these together:
 
