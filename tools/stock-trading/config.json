@@ -1,4 +1,6 @@
 {
+  "experiment_id": "exp-001",
+  "_experiment_id_note": "Canary for experiment integrity. Any change to the `risk`, `thresholds`, or `ranking` blocks requires bumping this and starting a fresh run of 5 paper sessions. See CLAUDE.md § Experiment discipline.",
   "_note": "Watchlist is now DYNAMIC — assembled each run from Phase 1.5 (morning screen) + any open positions. No fixed ticker list lives in config anymore. See .claude/skills/stock-trading/SKILL.md Phase 1.5 for the screen mechanics. Providers: Alpaca (account + snapshots), TradingView MCP coin_analysis (one call per ticker — no bulk endpoint), Finnhub /calendar/earnings (one batched HTTP call).",
   "screen": {
     "max_candidates": 15,
@@ -19,10 +21,10 @@
     "stock_score_min": 55
   },
   "risk": {
-    "max_position_pct_of_equity": 0.25,
-    "_max_position_pct_note": "paper trading — tighten to 0.10 before going live. Raised 0.20→0.25 on 2026-04-14 to fit 4-position deploy of residual cash after AMDG fill.",
-    "max_session_pct_of_cash": 1.00,
-    "_max_session_pct_note": "paper trading — tighten to 0.50 before going live. Temporarily raised to 1.00 on 2026-04-14 to deploy residual cash after AMDG fill.",
+    "max_position_pct_of_equity": 0.20,
+    "_max_position_pct_note": "paper trading — tighten to 0.10 before going live. Reverted from 0.25 to 0.20 on 2026-04-14 when the experiment was frozen under experiment_id=exp-001. Do not edit without bumping experiment_id.",
+    "max_session_pct_of_cash": 0.80,
+    "_max_session_pct_note": "paper trading — tighten to 0.50 before going live. Reverted from 1.00 to 0.80 on 2026-04-14 when the experiment was frozen under experiment_id=exp-001. Do not edit without bumping experiment_id.",
     "min_notional_usd": 50,
     "max_spread_pct_of_midpoint": 0.015,
     "_max_spread_pct_note": "paper trading — tighten to 0.003 (0.3%) before going live",

@@ -8,7 +8,7 @@ A Claude Code skill that runs a morning stock/ETF trading routine end-to-end: pu
 
 ## What it is (and isn't)
 
-**What it is:** a manually-triggered morning routine. Josue opens a Claude Code session, types `run the trading skill`, and Claude walks through seven phases — account snapshot, market sentiment, morning screen, dossier fetch, news lookup, reasoning, execution, log. The reasoning happens inside the Claude Code session itself; the Python layer only enforces hard money rules and appends the audit log.
+**What it is:** a manually-triggered morning routine. Josue opens a Claude Code session, types `run the trading skill`, and Claude walks through seven phases — account snapshot, market sentiment, morning screen, dossier fetch, news lookup, reasoning, execution, log. The reasoning happens inside the Claude Code session itself; the Python layer only enforces hard money rules and appends the audit log. **Typical cadence: one run per trading day at ~10:00 ET.** Running earlier makes the volume-ratio denominator tiny (<3% of a session by 09:40) and widens spreads — 10:00 is the canonical experiment time.
 
 **What it isn't:** a bot, a cron job, a background service, or an autonomous agent. There is no launchd entry, no systemd unit, no GitHub Action, no Anthropic API key in the repo. If Josue doesn't open a session and type a trigger phrase, nothing runs. If Claude is offline, nothing runs. This is a deliberate design choice — the point of the skill is to exercise Claude's live reasoning under real market conditions with a human in the loop, not to automate trading.
 
@@ -176,6 +176,7 @@ Everything strategy-related lives in [tools/stock-trading/config.json](tools/sto
 
 ```json
 {
+  "experiment_id": "exp-001",
   "screen": {
     "max_candidates": 15,
     "min_price": 5.00,
@@ -194,8 +195,8 @@ Everything strategy-related lives in [tools/stock-trading/config.json](tools/sto
     "stock_score_min": 55
   },
   "risk": {
-    "max_position_pct_of_equity": 0.25,
-    "max_session_pct_of_cash": 1.00,
+    "max_position_pct_of_equity": 0.20,
+    "max_session_pct_of_cash": 0.80,
     "min_notional_usd": 50,
     "max_spread_pct_of_midpoint": 0.015,
     "pdt_threshold_equity": 25000,
@@ -209,7 +210,9 @@ Everything strategy-related lives in [tools/stock-trading/config.json](tools/sto
 }
 ```
 
-**The `risk` values are deliberately loose for paper mode.** Each paper-mode value has a `_*_note` sibling in the JSON describing the tighter value to use before going live (e.g. `max_position_pct_of_equity` tightens from 0.25 → 0.10, `max_spread_pct_of_midpoint` tightens from 0.015 → 0.003). Don't touch these without reading the promotion checklist.
+**`experiment_id` is frozen for the duration of an experiment.** Any change to the `risk` or `thresholds` blocks requires bumping this field and restarting a fresh 5-run paper cycle. See `CLAUDE.md` § Non-obvious constraints for the full discipline.
+
+**The `risk` values are deliberately loose for paper mode.** Each paper-mode value has a `_*_note` sibling in the JSON describing the tighter value to use before going live (e.g. `max_position_pct_of_equity` tightens from 0.20 → 0.10, `max_spread_pct_of_midpoint` tightens from 0.015 → 0.003). Don't touch these without reading the promotion checklist.
 
 **There is no static watchlist.** The candidate list is assembled fresh each run from the morning screen plus any open positions. If you want to force-include a ticker, open a position in it first.
 
@@ -221,8 +224,8 @@ None of these are judgment calls. If `risk.py --validate` rejects an order, the 
 
 | Rule | Paper value | Live value (before promotion) |
 |---|---|---|
-| Max per-position size | 25% of equity | 10% of equity |
-| Max session allocation | 100% of cash | 50% of cash |
+| Max per-position size | 20% of equity | 10% of equity |
+| Max session allocation | 80% of cash | 50% of cash |
 | Min notional per order | $50 | $50 |
 | Max bid/ask spread | 1.5% of midpoint | 0.3% of midpoint |
 | PDT block | equity < $25k and `day_trade_count` ≥ 3 | same |

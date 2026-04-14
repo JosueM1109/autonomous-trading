@@ -5,9 +5,15 @@ description: Manually-triggered morning stock/ETF trading routine. Pulls account
 
 # Skill: stock-trading
 
-**Manually triggered.** There is no cron, no launchd, no background process. Josue runs this inside a Claude Code session when he wants it to run.
+**Manually triggered.** There is no cron, no launchd, no background process. Josue runs this inside a Claude Code session when he wants it to run. **Typical cadence: one run per trading day at ~10:00 ET.** Running earlier than 10:00 is allowed but introduces well-known data-quality problems — the volume-ratio denominator is tiny (<3% of a session by 09:40), bid/ask spreads are 2–5× wider than later in the morning, and premarket gaps haven't resolved. 10:00 ET is the canonical experiment time.
 
 **Paper trading by default.** Only goes live when `ALPACA_PAPER=false` is set in `.env`. Never place a market order under any circumstance — limit orders only.
+
+## Experiment discipline
+
+The `risk`, `thresholds`, and (future) `ranking` blocks in `tools/stock-trading/config.json` are **frozen for the duration of an experiment**. Each experiment has an `experiment_id` at the top of the config file. Any change to those blocks requires bumping `experiment_id` and starting a fresh run of 5 paper sessions. Mid-experiment tweaks to risk caps or thresholds silently corrupt the data the skill is supposed to produce.
+
+The skill reads `experiment_id` from config in Phase 0 and passes it through to the logger payload as `experiment_id` in Phase 6. Every row in `logs/trading-log.jsonl` carries the experiment id it was generated under, so later analysis can segment cleanly.
 
 ## Trigger Phrases
 `run the trading skill`, `run trading`, `trade`, `morning trades`, `stock trading`
@@ -57,7 +63,8 @@ If any required MCP server is not connected, refuse to run and tell Josue which 
 ## Morning Routine
 
 ### Phase 0 — Load config + parse flags
-- `Read tools/stock-trading/config.json`. Extract `screen`, `thresholds`, `risk`, `toggles`.
+- `Read tools/stock-trading/config.json`. Extract `experiment_id`, `screen`, `thresholds`, `risk`, `toggles`.
+- Stash `experiment_id` on the run dossier immediately — it rides through to Phase 6's logger payload unchanged.
 - **There is no static `watchlist` in config anymore.** The tradable list for the session is assembled in Phase 1.5 from the morning screen + any open positions.
 - If the trigger phrase includes `--dry-run`, set `dry_run=true`.
 - Compute today's date in `America/New_York` (used as the idempotency key).
@@ -156,7 +163,7 @@ For every ticker in `candidates`, fire all of these at once:
 - `mcp__alpaca__get_stock_snapshot` · `symbols` = comma-joined `candidates` (one call, batched — do not fan out). Returns `latestQuote` (bid/ask), `latestTrade` (last), `dailyBar` (intraday OHLCV), `prevDailyBar` (prior close + prior volume). Derive:
   - `bid`, `ask`, `last` ← `latestQuote.bp` / `latestQuote.ap` / `latestTrade.p`
   - `premarket_change_pct` ← `(dailyBar.o - prevDailyBar.c) / prevDailyBar.c * 100` (opening gap vs prior close — meaningful from 09:30 ET onward)
-  - `volume_ratio` ← **time-adjusted**: `dailyBar.v / (prevDailyBar.v * (minutes_since_open / 390))` where 390 is total RTH minutes (09:30–16:00 ET) and `minutes_since_open = max(1, floor((now_et - 09:30_et).total_seconds() / 60))`. The ratio is **normalized against elapsed session time**: >1 means the ticker is tracking above yesterday's full-day volume on a per-minute basis, >1.5 means it's running clearly hot, regardless of whether it's 09:35 or 15:45. At exactly 09:30 the denominator would be zero — the `max(1, …)` floor prevents division-by-zero and makes the first minute read as "very heavy" which is harmless because Phase 2 is never called before 09:31 in practice.
+  - `volume_ratio` ← **time-adjusted**: `dailyBar.v / (prevDailyBar.v * (minutes_since_open / 390))` where 390 is total RTH minutes (09:30–16:00 ET) and `minutes_since_open = max(1, floor((now_et - 09:30_et).total_seconds() / 60))`. The ratio is **normalized against elapsed session time**: >1 means the ticker is tracking above yesterday's full-day volume on a per-minute basis, >1.5 means it's running clearly hot, regardless of whether it's 10:00 or 15:45. At exactly 09:30 the denominator would be zero — the `max(1, …)` floor prevents division-by-zero and makes the first minute read as "very heavy" which is harmless because Phase 2 is never called before 10:00 in practice.
 
 **Finnhub (HTTP, called via bash — not MCP):**
 - Fire one single `curl` request covering the full candidate list (not one per ticker):
@@ -329,6 +336,7 @@ stdin: one JSON object with the full run dossier:
 {
   "run_id": "<ISO8601 UTC>",
   "timestamp": "<ISO8601 UTC>",
+  "experiment_id": "exp-001",
   "mode": "paper" | "live",
   "dry_run": false,
   "account_snapshot": { ... },

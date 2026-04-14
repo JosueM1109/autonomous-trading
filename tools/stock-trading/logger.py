@@ -5,6 +5,12 @@ Reads one run object as JSON on stdin, appends it as a single line to
 logs/trading-log.jsonl, and prints {"ok": true, "run_id": ..., "path": ...}
 to stdout. Uses fcntl.flock for crash safety so concurrent writers cannot
 interleave partial lines. stdlib only.
+
+This writer is a pure pass-through — it does not inspect, validate, or
+transform the run payload except to stamp `logged_at`. The schema contract
+(including `experiment_id`, decisions, orders, etc.) lives in SKILL.md
+Phase 6. Adding a field there means populating it in the skill; this file
+does not need to change.
 """
 
 import fcntl

@@ -87,8 +87,10 @@ echo '{"date":"2026-04-13","account":{"equity":10000,"cash":5000,"day_trade_coun
 
 Expected output (keys in any order):
 ```json
-{"ok": true, "abort": false, "max_per_position": 1000.0, "max_session_allocation": 2500.0, "pdt_headroom": 3, "session_deployed_so_far": 0.0, ...}
+{"ok": true, "abort": false, "max_per_position": 2000.0, "max_session_allocation": 4000.0, "pdt_headroom": 3, "session_deployed_so_far": 0.0, ...}
 ```
+
+These values follow the frozen `experiment_id: exp-001` paper caps (`0.20 * $10k = $2k` per position, `0.80 * $5k = $4k` per session). If you see `1000.0 / 2500.0` or `2500.0 / 5000.0`, `config.json` has drifted from the experiment baseline — check whether `experiment_id` was bumped and risk caps were changed.
 
 ```bash
 # risk.py --validate (approved)
