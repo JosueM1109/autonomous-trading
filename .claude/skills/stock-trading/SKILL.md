@@ -1,11 +1,13 @@
 ---
 name: stock-trading
-description: Manually-triggered morning stock/ETF trading routine. Pulls account snapshot and per-ticker dossiers through Alpaca + TradingView Screener MCP servers and a Finnhub earnings HTTP call; reasons through BUY/SELL/HOLD decisions against a fixed strategy; validates each order through a Python risk layer; places limit-only orders on Alpaca; appends a full audit log. Paper trading by default. Trigger phrases — "run the trading skill", "run trading", "trade", "morning trades", "stock trading". Supports --dry-run.
+description: Autonomous morning stock/ETF trading agent. Pulls account snapshot and per-ticker dossiers through Alpaca + TradingView Screener MCP servers and a Finnhub earnings HTTP call; reasons through BUY/SELL/HOLD decisions against a fixed strategy with no human checkpoint; validates each order through a Python risk layer; places limit-only orders on Alpaca; appends a full audit log. Paper trading by default. Triggered by invocation (manual today — "run the trading skill", "run trading", "trade", "morning trades", "stock trading"; scheduled via a Claude Code routine later). Supports --dry-run.
 ---
 
 # Skill: stock-trading
 
-**Manually triggered.** There is no cron, no launchd, no background process. Josue runs this inside a Claude Code session when he wants it to run. **Typical cadence: one run per trading day at ~10:00 ET.** Running earlier than 10:00 is allowed but introduces well-known data-quality problems — the volume-ratio denominator is tiny (<3% of a session by 09:40), bid/ask spreads are 2–5× wider than later in the morning, and premarket gaps haven't resolved. 10:00 ET is the canonical experiment time.
+**Autonomous by design.** Once invoked, this skill runs end-to-end with full trade authority — Claude Code decides BUY/SELL/HOLD, `risk.py` enforces the hard money rules, and Alpaca places the orders. There is no human checkpoint between reasoning and execution. The only remaining manual step today is the invocation itself; a Claude Code routine can replace even that without changing a line of skill code.
+
+**Typical cadence: one run per trading day at ~10:00 ET.** Earlier runs are allowed but introduce well-known data-quality problems — the volume-ratio denominator is tiny (<3% of a session by 09:40), bid/ask spreads are 2–5× wider than later in the morning, and premarket gaps haven't resolved. 10:00 ET is the canonical experiment time.
 
 **Paper trading by default.** Only goes live when `ALPACA_PAPER=false` is set in `.env`. Never place a market order under any circumstance — limit orders only.
 
@@ -35,7 +37,7 @@ Plus one HTTP call each run:
 
 - **Finnhub** — earnings calendar. Called directly via `curl` in Phase 2, not via MCP. Free tier key required in `.env` as `FINNHUB_API_KEY`.
 
-If any required MCP server is not connected, refuse to run and tell Josue which one is missing. See `tools/stock-trading/SETUP.md`.
+If any required MCP server is not connected, refuse to run and surface which one is missing in the summary output and the audit log. See `tools/stock-trading/SETUP.md`.
 
 ---
 
@@ -120,7 +122,7 @@ The endpoint requires both a browser-like `User-Agent` and a matching `Referer` 
 
 **If the curl fails** (network error, schema change, empty body), set `fear_greed_score = null` and `fear_greed_rating = null` and continue the run — **do not abort**. Phase 4 must handle the null case by skipping the sentiment adjustment entirely, not by blocking trades.
 
-If `trading_blocked` or `account_blocked` is `true`, abort the run immediately and tell Josue.
+If `trading_blocked` or `account_blocked` is `true`, abort the run immediately and surface the block reason in the summary output and the audit log.
 
 **After-hours warning:** If `mcp__alpaca__get_clock` returns `is_open=false`, emit a warning banner at the top of the summary: `⚠️ market is closed — quotes may be stale, spreads wider than RTH, after-hours dry runs will skip most tickers`. Continue the run (dry runs are often intentional after hours), but this sets expectations before the skip list appears.
 
@@ -263,7 +265,7 @@ python3 tools/stock-trading/risk.py --snapshot
 stdin: `{ "date": "YYYY-MM-DD", "account": {...}, "positions": [...] }` (built from Phase 1 results)
 
 stdout: risk context. Read these fields:
-- `abort` — if `true`, stop the whole run and surface `abort_reason` to Josue
+- `abort` — if `true`, stop the whole run and surface `abort_reason` in the summary output and the audit log
 - `pdt_headroom` — remaining day trades (-1 = unlimited)
 - `max_per_position` — dollar cap per new position
 - `max_session_allocation` — total dollars deployable this session
@@ -339,7 +341,7 @@ Log every SELL decision with the triggering rule(s) in the rationale — a reade
 **Override: `force_eod_close_active` is true**
 → For every open position, emit a SELL decision regardless of other signals. Rationale: `force_eod_close cutoff passed`. Normal risk validation still applies.
 
-> **Paper-experiment doctrine:** a trade placed beats no trade placed. The risk layer (`risk.py`) still enforces all the hard money rules — 10% per-position cap, 50% session cap, $50 minimum notional, 0.5% spread cap, PDT block, duplicate-order block — so "always trade" cannot actually blow up the account. It just guarantees the experiment produces data every time it runs.
+> **Autonomous-experiment doctrine:** a trade placed beats no trade placed *because there is no human on the other side reviewing HOLDs*. The entire point of this skill is to produce a dataset of autonomous trading decisions under real market conditions; a run full of HOLDs is an empty cell in that dataset. The risk layer (`risk.py`) enforces every hard money rule — per-position cap, session cap, min notional, spread cap, PDT block, duplicate-order block (current paper values and live targets are documented in `tools/stock-trading/config.json` and § Hard Safety Rules below) — so "always trade" cannot blow up the account even when reasoning is wrong. The minimum-trade rule is how the agent keeps producing data; the risk layer is how the agent can't produce catastrophe. Both exist because nobody is going to read a decision before it executes.
 
 ### Phase 5 — Execution (per non-HOLD decision)
 For each BUY/SELL, in sequence:
@@ -351,7 +353,7 @@ For each BUY/SELL, in sequence:
 
 2. **Compute qty:**
    - Buy: `floor(max_per_position / limit_price)`; if `qty * limit_price < 50`, skip with reason "notional below $50 minimum".
-   - Sell: use the full position qty (or the qty Josue confirms if partial).
+   - Sell: use the full position qty. (Partial sells are not currently supported — no path in this skill asks a human for a quantity override. If partial-sell logic is needed later, add it as a deterministic rule in Phase 4 so the agent picks the qty itself.)
 
 3. **Validate (reserves a pending entry in state.json):**
    ```bash
@@ -429,8 +431,8 @@ stdin: one JSON object with the full run dossier:
 }
 ```
 
-### Phase 7 — Summary (print to Josue)
-See Output Format below.
+### Phase 7 — Summary (print to stdout)
+Emit the summary block defined in Output Format below. This is not an approval request — the run has already completed and the orders (if any) are already placed when Phase 7 renders. The summary exists so a human reading the terminal (or log) afterwards can see what the agent did without grepping JSONL.
 
 ---
 
@@ -448,6 +450,9 @@ If the trigger includes `--dry-run`:
 ---
 
 ## Hard Safety Rules (enforced by `risk.py`)
+
+These are the entire safety envelope between Claude Code's reasoning and a real order. There is no human review step. If the agent's reasoning is wrong, the only thing stopping an incorrect trade is this list.
+
 - **Max 20% of equity per position** — paper trading; tighten to 10% before going live.
 - **Max 80% of cash deployed per session** — paper trading; tighten to 50% before going live.
 - Minimum $50 notional per order.
@@ -500,15 +505,40 @@ Omit empty sections. Keep it scannable.
 
 ## Promotion Checklist — Paper → Live
 
-Do NOT flip `ALPACA_PAPER=false` in `.env` until:
+Do NOT flip `ALPACA_PAPER=false` in `.env` until every item below is true. Every item is either a script-able check or a grep over `logs/trading-log.jsonl` and `logs/outcomes.jsonl`. None of them require anyone to eyeball individual trades — this is an autonomous agent; the human's job is verifying the envelope, not the picks.
 
-- [ ] 5 consecutive clean paper runs, each reviewed the same morning
-- [ ] Every `logs/trading-log.jsonl` entry from those runs read end-to-end
-- [ ] No MCP errors in any of those 5 runs
-- [ ] `risk.py --validate` has rejected at least one real order (proof the guardrails fire)
-- [ ] Plan in place for what to do if the first live run places an order Josue disagrees with
+### Guardrails actually fire
+- [ ] `risk.py --validate` has rejected at least one real order across the evaluation window (check `risk_overrides` in `trading-log.jsonl`). Proof the hard-cap path is wired up, not silently no-oping.
+- [ ] At least one of {spread cap, session cap, per-position cap, PDT block, idempotency} has been exercised with a real rejection. Synthetic smoke-test rejections do not count.
+- [ ] `min_trade_override_waived` has fired on < 5% of runs over the last 20 runs. A higher rate means the morning screen is producing garbage; fix the screen before going live.
+- [ ] Every `--dry-run` run in the evaluation window left `logs/state.json` clean (no stale `pending` entries). Proves the commit/release path is symmetric and autonomous cleanup works without intervention.
 
-Going live is a one-line change. Going back to paper is the same one-line change. Use it.
+### Audit log captures enough to analyze outcomes post-hoc
+- [ ] Last 20 runs of `trading-log.jsonl` have 100% coverage of: `experiment_id`, `ranking_version`, per-decision `confidence`, `min_trade_override`, `rationale`, `risk_overrides`, and (for placed orders) `order_id`. Grep-able check, zero judgment.
+- [ ] `run-summary.py --since <start>` runs cleanly over the evaluation window with no KeyError / missing-field errors.
+- [ ] Evaluate Mode has been run over the evaluation window and `logs/outcomes.jsonl` has real data — at least one decision reaching `t5` per run on average. Proves the measurement pipeline works; without it there is no way to tell whether going live is a good idea.
+
+### Decision patterns are not obviously broken
+- [ ] Over the last 20 runs, SELL decisions have fired on real hard-rule triggers (stop-loss / take-profit / STRONG_SELL / `force_eod_close`), not just BUYs. A SELL-less window means the exit path is untested under the current ranking version.
+- [ ] Organic-BUY vs `min_trade_override`-BUY mean T+5 return in `outcomes.jsonl` does not show override BUYs catastrophically underperforming (rough threshold: override mean T+5 not worse than organic mean T+5 by more than 300 bps). If it's worse, the too-garbage-to-trade waiver threshold needs tightening, not live promotion.
+- [ ] No single-ticker concentration pattern: over the last 20 runs, no single ticker makes up more than 25% of placed BUYs. (If the agent is always picking the same name, ranking is broken.)
+
+### Config is aligned with live targets
+- [ ] `config.json` `risk` block is at the values documented in the live-target column below, not at paper-mode values.
+- [ ] `experiment_id` has been bumped and a fresh evaluation window of ≥ 20 runs exists under the new id. Live promotion on a half-run experiment is forbidden.
+
+| Field | Paper value | Live target |
+|---|---|---|
+| `max_position_pct_of_equity` | 0.20 (current; tighten to 0.10 in a follow-up doctrine pass) | 0.10 |
+| `max_session_pct_of_cash` | 0.80 (current; tighten to 0.50 in a follow-up doctrine pass) | 0.50 |
+| `max_spread_pct_of_midpoint` | 0.015 (gated on minimum-trade-rule rework — see `_max_spread_pct_note` in `config.json`) | 0.003 |
+
+### Operational readiness
+- [ ] Kill switch is defined and documented: flipping `ALPACA_PAPER=true` back in `.env` takes < 10 seconds. This is the rollback procedure — there is no other.
+- [ ] Post-run log review has a cadence (even if that cadence is "weekends only"). The human does not review before trades happen; they review afterward, and that review needs a schedule, not a "when I remember to."
+- [ ] The `force_eod_close` toggle has been exercised in at least one paper run so the EOD flatten path is known-good before going live.
+
+Going live is a one-line change. The kill switch is the same one-line change in reverse. Use it freely.
 
 ---
 
@@ -591,7 +621,7 @@ The reducer appends each line with `fcntl.flock` coordination, same crash-safety
 
 ### E4 — summary
 
-Print a plain-text summary to Josue. Sections:
+Print a plain-text summary to stdout. Sections:
 
 - **Work queue processed:** counts by `next_state` attempted (e.g. "pending_fill → filled: 3 advanced, 1 stuck") and by `outcome_state` after this pass.
 - **Outcomes so far (all runs):**
@@ -600,7 +630,7 @@ Print a plain-text summary to Josue. Sections:
   - Mean `return_t5_pct` split by `min_trade_override: true` vs `false` — this is the primary experimental measurement (does the minimum-trade rule produce worse outcomes than organic picks?).
   - Mean `return_t5_pct` split by `confidence: high` / `medium` / `low`, with hit rate (% positive).
   - Count of decisions that terminated as `unfilled_cancelled`.
-- **Still pending:** count of decisions still at `pending_fill` and at each intermediate state, with the earliest `run_id` in each bucket so Josue knows how old the stale-est one is.
+- **Still pending:** count of decisions still at `pending_fill` and at each intermediate state, with the earliest `run_id` in each bucket so the oldest stuck decision is visible at a glance.
 
 Plain text only — no color codes, no unicode box drawing. Output should be pipe-safe so it can be redirected to a file.
 
@@ -610,7 +640,7 @@ Plain text only — no color codes, no unicode box drawing. Output should be pip
 
 | Path | Purpose |
 |---|---|
-| `tools/stock-trading/config.json` | Watchlist, strategy thresholds, `ranking` weights, `experiment_id`, `force_eod_close` toggle |
+| `tools/stock-trading/config.json` | Screen config, strategy thresholds, risk caps, `ranking` weights, `experiment_id`, `force_eod_close` toggle |
 | `tools/stock-trading/risk.py` | Hard safety rules. `--snapshot` / `--validate` / `--commit` / `--release` modes. Owns `logs/state.json`. |
 | `tools/stock-trading/logger.py` | Append-only JSONL writer with `fcntl.flock` crash safety |
 | `tools/stock-trading/outcomes_reducer.py` | Evaluate Mode reducer — `--current-state` emits the work queue, `--append` writes new outcomes rows |

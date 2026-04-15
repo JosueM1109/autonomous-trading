@@ -8,9 +8,9 @@ A Claude Code skill that runs a morning stock/ETF trading routine end-to-end: pu
 
 ## What it is (and isn't)
 
-**What it is:** a manually-triggered morning routine. Josue opens a Claude Code session, types `run the trading skill`, and Claude walks through seven phases — account snapshot, market sentiment, morning screen, dossier fetch, news lookup, reasoning, execution, log. The reasoning happens inside the Claude Code session itself; the Python layer only enforces hard money rules and appends the audit log. **Typical cadence: one run per trading day at ~10:00 ET.** Running earlier makes the volume-ratio denominator tiny (<3% of a session by 09:40) and widens spreads — 10:00 is the canonical experiment time.
+**What it is:** an autonomous trading agent running inside a Claude Code session. When invoked, Claude Code itself makes every BUY/SELL/HOLD call, sizes it, prices it, places the limit order, and moves on. There is no human checkpoint between the reasoning layer and the order — `risk.py` enforces hard money rules as the only safety net. The human's role is invocation (manual today, via a scheduled Claude Code routine later) and post-hoc review of `logs/trading-log.jsonl` for the experiment analysis — not approval of individual trades.
 
-**What it isn't:** a bot, a cron job, a background service, or an autonomous agent. There is no launchd entry, no systemd unit, no GitHub Action, no Anthropic API key in the repo. If Josue doesn't open a session and type a trigger phrase, nothing runs. If Claude is offline, nothing runs. This is a deliberate design choice — the point of the skill is to exercise Claude's live reasoning under real market conditions with a human in the loop, not to automate trading.
+**What it isn't, yet:** scheduled. Today the skill runs because someone typed a trigger phrase at the terminal, typically at ~10:00 ET. That's the only remaining manual step, and it's a deployment detail, not a design feature — a Claude Code routine can replace it at any time without changing a line of skill or risk-layer code. The project exists to measure how well Claude Code reasons under real market conditions *when it has actual trade authority*, not to practice decision-making under supervision. **Why ~10:00 ET:** the canonical experiment time. Running earlier makes the volume-ratio denominator tiny (<3% of a session by 09:40) and widens spreads — a future scheduled trigger will fire at 10:00 ET for the same data-quality reasons.
 
 The candidate list is **dynamic**: each run discovers its own tickers via a TradingView volume scanner across NYSE + NASDAQ, merges in any open positions, and fans out per-ticker dossier calls in parallel. There is no static watchlist.
 
@@ -19,10 +19,10 @@ The candidate list is **dynamic**: each run discovers its own tickers via a Trad
 ## Architecture at a glance
 
 ```
-                                   ┌─────────────────────────────┐
-                                   │    Claude Code session       │
-                                   │  (reasoning + orchestration) │
-                                   └──────────────┬──────────────┘
+                                   ┌──────────────────────────────────────┐
+                                   │       Claude Code session            │
+                                   │ (autonomous reasoning + orchestration)│
+                                   └──────────────────┬───────────────────┘
                                                   │
                ┌──────────────────────────────────┼──────────────────────────────────┐
                │                                  │                                  │
@@ -78,7 +78,7 @@ Phase definitions are authoritative in [.claude/skills/stock-trading/SKILL.md](.
 | 4 | Reasoning, no tool calls — rank candidates, apply the minimum-trade rule, pick BUY/SELL/HOLD | — |
 | 5 | Per non-HOLD decision: compute limit price, compute qty, `risk.py --validate`, place limit order | sequential |
 | 6 | `logger.py` — append one JSONL row (skipped on `--dry-run`) | — |
-| 7 | Print summary to Josue | — |
+| 7 | Print summary to stdout (post-hoc, after orders already placed) | — |
 
 The minimum-trade rule is the most important thing to understand: **every run must place at least one BUY unless it's a dry run, the account is blocked, or every candidate failed its dossier fetch.** A run full of HOLDs is a useless data point — it produces nothing to learn from — so Phase 4 will override the weakest HOLD into a BUY on the top-ranked non-blocked candidate if reasoning would otherwise produce zero trades. The audit log distinguishes "organic BUY" from "minimum-trade override BUY" in the rationale field. See the doctrine note in SKILL.md for the full reasoning.
 
@@ -159,6 +159,8 @@ Full walkthrough is in [tools/stock-trading/SETUP.md](tools/stock-trading/SETUP.
 
 ## Running the skill
 
+Every run is autonomous end-to-end: once a trigger phrase fires, Claude Code decides, `risk.py` validates, Alpaca executes, and the run appends its row to the audit log without any further human input. A future Claude Code routine can replace the trigger phrase, leaving the doctrine unchanged.
+
 In a Claude Code session, inside this repo:
 
 | Trigger | Behavior |
@@ -221,6 +223,8 @@ Everything strategy-related lives in [tools/stock-trading/config.json](tools/sto
 
 ## Hard safety rules (enforced by `risk.py`)
 
+These rules are the entire safety envelope. Because there is no human reviewing decisions before they execute, a reasoning mistake inside Claude Code can only turn into a placed order if it *also* passes every rule below. Treat the table as the specification for "what the agent is allowed to do to the account," not as a second line of defense after a human check.
+
 None of these are judgment calls. If `risk.py --validate` rejects an order, the skill logs the reason and skips the ticker. **It never retries with tweaked parameters.**
 
 | Rule | Paper value | Live value (before promotion) |
@@ -262,16 +266,9 @@ The log is append-only and coordinated by `fcntl.flock` so concurrent writers ca
 
 ## Promotion checklist — paper → live
 
-Do **not** flip `ALPACA_PAPER=false` in `.env` until all of the following are true:
+The canonical checklist lives in [.claude/skills/stock-trading/SKILL.md](.claude/skills/stock-trading/SKILL.md#promotion-checklist--paper--live). Read it there. Every item is grep-able or scriptable — none of them require eyeballing individual trades, because this is an autonomous agent and the human's job is verifying the envelope, not the picks.
 
-- [ ] Five consecutive clean paper runs, each reviewed the same morning
-- [ ] Every `logs/trading-log.jsonl` entry from those runs read end-to-end
-- [ ] Zero MCP errors across those five runs
-- [ ] `risk.py --validate` has rejected at least one real order (proof the guardrails actually fire)
-- [ ] The `risk` block in `config.json` has been tightened to live values (see `_*_note` fields)
-- [ ] You have a plan for what to do if the first live run places an order you disagree with
-
-Going live is a one-line change. Going back to paper is the same one-line change. Use it freely.
+Going live is a one-line `.env` change. The kill switch is the same one-line change in reverse. Use it freely.
 
 ---
 
@@ -282,18 +279,18 @@ Going live is a one-line change. Going back to paper is the same one-line change
 - **TradingView exchange whitelist is `NASDAQ / NYSE / BIST / EGX / BURSA / HKEX`.** Anything else (including `AMEX` / `NYSEARCA`) silently falls back to the server's `KUCOIN` default and returns "No data found". That's why the morning screen is restricted to NYSE + NASDAQ.
 - **Limit orders only, always.** `mcp__alpaca__place_stock_order` is always called with `type: "limit"`. Buy limit = `min(ask, midpoint × 1.001)`. Sell limit = `max(bid, midpoint × 0.999)`.
 - **Fear & Greed is a soft dependency.** If the CNN curl fails, the sentiment adjustment is skipped, not blocked.
-- **Reasoning lives in Markdown, not code.** The phase logic, the minimum-trade rule, the exclusion rules, and the ranking heuristic are all in [.claude/skills/stock-trading/SKILL.md](.claude/skills/stock-trading/SKILL.md). If you want to change behavior, edit the skill — not `risk.py`.
+- **Reasoning lives in Markdown, not code.** The phase logic, the minimum-trade rule, the exclusion rules, and the ranking heuristic are all in [.claude/skills/stock-trading/SKILL.md](.claude/skills/stock-trading/SKILL.md). If you want to change behavior, edit the skill — not `risk.py`. The skill is the agent's full behavior specification — there is no second reasoning pass happening in Python, and no human reviewer sanity-checking it before execution. When editing `SKILL.md`, assume every word you write is being executed by an autonomous agent with real trade authority.
 
 ---
 
 ## Contributing / editing
 
-This is a single-operator repo. If you fork it:
+This is a single-operator repo and the operator does not review decisions before they execute. That means:
 
-1. Read [.claude/skills/stock-trading/SKILL.md](.claude/skills/stock-trading/SKILL.md) end-to-end first.
+1. Read [.claude/skills/stock-trading/SKILL.md](.claude/skills/stock-trading/SKILL.md) end-to-end first — it's the agent's behavior contract.
 2. Read [CLAUDE.md](CLAUDE.md) for the orientation future Claude sessions will see.
 3. Treat the three layers as separate: reasoning changes go in the skill, risk-rule changes go in `risk.py` and `config.json`, log-format changes go in `logger.py`. Don't mix.
-4. Never add a code path that places a market order. Never add a code path that bypasses `risk.py --validate`. Never add a code path that retries a rejected order with different parameters.
+4. Never add a code path that places a market order. Never add a code path that bypasses `risk.py --validate`. Never add a code path that retries a rejected order with different parameters. Never add a code path that asks the human for confirmation — if you find yourself wanting one, the guardrail belongs in `risk.py`, not in the skill.
 5. Paper trading is the default. Live mode is a one-line `.env` flip gated by the promotion checklist — not a config option to expose.
 
 ---

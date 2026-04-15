@@ -22,12 +22,12 @@
   },
   "risk": {
     "max_position_pct_of_equity": 0.20,
-    "_max_position_pct_note": "paper trading — tighten to 0.10 before going live. Reverted from 0.25 to 0.20 on 2026-04-14 when the experiment was frozen under experiment_id=exp-001. Do not edit without bumping experiment_id.",
+    "_max_position_pct_note": "Tighten target (autonomous-doctrine + live): 0.10. Current 0.20 is loose for paper mode only because a miscalibration is bounded by the paper account balance — NOT because a human reviews picks before they execute (no human checkpoint exists; see SKILL.md § Autonomous-experiment doctrine). Queued for tightening to 0.10 in a follow-up commit under a fresh experiment_id. Reverted from 0.25 to 0.20 on 2026-04-14 when the experiment was frozen under experiment_id=exp-001. Do not edit without bumping experiment_id.",
     "max_session_pct_of_cash": 0.80,
-    "_max_session_pct_note": "paper trading — tighten to 0.50 before going live. Reverted from 1.00 to 0.80 on 2026-04-14 when the experiment was frozen under experiment_id=exp-001. Do not edit without bumping experiment_id.",
+    "_max_session_pct_note": "Tighten target (autonomous-doctrine + live): 0.50. Current 0.80 is loose for paper mode only because a miscalibration is bounded by the paper account balance — NOT because a human reviews picks before they execute. Queued for tightening to 0.50 in a follow-up commit under a fresh experiment_id. Reverted from 1.00 to 0.80 on 2026-04-14 when the experiment was frozen under experiment_id=exp-001. Do not edit without bumping experiment_id.",
     "min_notional_usd": 50,
     "max_spread_pct_of_midpoint": 0.015,
-    "_max_spread_pct_note": "paper trading — tighten to 0.003 (0.3%) before going live",
+    "_max_spread_pct_note": "Tighten target (live): 0.003. UNLIKE the position/session caps, this value's looseness is NOT a human-review artifact — it exists so a tighter cap plus the current minimum-trade rule does not silently defeat the morning screen on wide-spread tickers. Tightening it without first reworking the minimum-trade-rule / screen-filter interaction would cause every run to skip every ticker. Before going live, tighten this to 0.003 AND rework the interaction so the experiment doesn't produce empty runs.",
     "pdt_threshold_equity": 25000,
     "pdt_max_day_trades": 3
   },

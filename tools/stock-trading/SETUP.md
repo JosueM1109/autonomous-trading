@@ -148,7 +148,7 @@ Expected: account snapshot, morning screen result (N candidates discovered from 
 
 The candidate list is now **dynamic** — there's no fixed watchlist in config. Each run discovers its own oversold/high-relative-volume names via `smart_volume_scanner`, merges with open positions, applies the `screen.min_price` floor client-side, then runs the full dossier fetch. If the screen returns zero hits on a given morning, the run ends cleanly with "no candidates" and no orders.
 
-Review the output. If the screen returned a sensible candidate list, every surviving candidate produced a complete dossier, and every decision reads sensibly, you are ready for a paper run.
+This is a smoke test of the pipeline, not a decision review. Confirm: the screen returned a non-empty candidate list, every surviving candidate produced a complete dossier, `risk.py --validate` was called once per non-HOLD decision, and the summary rendered cleanly. If any of those are broken, fix them before a paper run. You are **not** evaluating whether the agent's trade picks "look good" — that judgment is not in scope for this project, and the whole point of the skill is that the agent decides autonomously.
 
 ---
 
@@ -191,12 +191,6 @@ python3 tools/stock-trading/run-summary.py --experiment exp-002
 
 ## 9. Promotion checklist (before going live)
 
-Do **not** flip `ALPACA_PAPER=false` until:
+The canonical checklist lives in [`.claude/skills/stock-trading/SKILL.md`](../../.claude/skills/stock-trading/SKILL.md#promotion-checklist--paper--live) — read it there. Every item is grep-able or scriptable; none of them require eyeballing individual trades, because this is an autonomous agent and the human's job is verifying the envelope, not the picks.
 
-- [ ] 5 consecutive clean paper runs, each reviewed the same morning
-- [ ] Every `logs/trading-log.jsonl` entry reviewed for bad reasoning or missing dossiers
-- [ ] No MCP errors in any of those 5 runs
-- [ ] `risk.py --validate` has rejected at least one real order (confirm the guardrails fire)
-- [ ] You have a plan for what you will do if the first live run places an order you disagree with
-
-Going live is a one-line change in `.env`. Going back to paper is the same one-line change. Use it.
+Going live is a one-line change in `.env`. The kill switch is the same one-line change in reverse. Use it freely.
