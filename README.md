@@ -1,5 +1,7 @@
 # autonomous-trading
 
+> **v1 — manual-invocation design.** Active development has moved to a private repo for routine-based autonomous operation. This version remains here as a reference implementation.
+
 A Claude Code skill that runs a morning stock/ETF trading routine end-to-end: pulls an account snapshot and per-ticker dossiers through MCP, reasons through BUY/SELL/HOLD against a fixed strategy, validates every order through a Python risk layer, places limit-only orders on Alpaca, and appends a full audit log.
 
 **Paper trading by default.** Live trading is a one-line change in `.env` that is gated by a five-run promotion checklist. Nothing in this repo places a market order under any circumstance — the skill uses limit orders only.
